@@ -1,9 +1,10 @@
+@"
+.venv/
 venv/
 __pycache__/
-*.pyc
-
-# Dataset
-data/
-
-# Outputs
-*.log
+*.py[cod]
+data/*.db
+uploads/
+.env
+.streamlit/secrets.toml
+"@ | Set-Content .gitignore
