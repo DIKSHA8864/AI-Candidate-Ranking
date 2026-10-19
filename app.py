@@ -351,16 +351,238 @@ if page == "Dashboard":
 # ---------------- OTHER NAVIGATION PAGES ----------------
 
 elif page == "Candidates":
-    st.title("Candidates")
-    st.write(
-        "Candidate management will be implemented in Step 4. "
-        "The database is already connected."
+    st.title("Candidate Management")
+    st.caption("Add, search, update, and manage candidate profiles.")
+
+    # ---------- ADD CANDIDATE ----------
+    with st.expander("➕ Add New Candidate", expanded=False):
+        with st.form("add_candidate_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                name = st.text_input("Full Name *")
+                email = st.text_input("Email")
+                phone = st.text_input("Phone")
+
+            with col2:
+                location = st.text_input("Location")
+                experience = st.number_input(
+                    "Experience (years)",
+                    min_value=0.0,
+                    max_value=60.0,
+                    value=0.0,
+                    step=0.5,
+                )
+                skills = st.text_input(
+                    "Skills",
+                    placeholder="Python, SQL, Machine Learning",
+                )
+
+            summary = st.text_area("Professional Summary")
+
+            submitted = st.form_submit_button(
+                "Add Candidate",
+                type="primary",
+            )
+
+            if submitted:
+                if not name.strip():
+                    st.error("Full name is required.")
+                else:
+                    try:
+                        with get_connection() as conn:
+                            conn.execute(
+                                """
+                                INSERT INTO candidates
+                                (name, email, phone, location, skills,
+                                 experience_years, summary)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    name.strip(),
+                                    email.strip() or None,
+                                    phone.strip(),
+                                    location.strip(),
+                                    skills.strip(),
+                                    experience,
+                                    summary.strip(),
+                                ),
+                            )
+
+                        st.success("Candidate added successfully.")
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "Could not add candidate. "
+                            "Check whether the email already exists. "
+                            f"Details: {exc}"
+                        )
+
+    st.divider()
+
+    # ---------- SEARCH AND LIST ----------
+    st.subheader("All Candidates")
+
+    search = st.text_input(
+        "Search candidates",
+        placeholder="Search by name, email, location, or skills",
     )
 
-    st.metric(
-        "Total Candidates",
-        get_count("SELECT COUNT(*) FROM candidates"),
+    candidates_df = fetch_dataframe(
+        """
+        SELECT id, name, email, phone, location, skills,
+               experience_years, summary, created_at
+        FROM candidates
+        WHERE name LIKE ?
+           OR COALESCE(email, '') LIKE ?
+           OR COALESCE(location, '') LIKE ?
+           OR COALESCE(skills, '') LIKE ?
+        ORDER BY id DESC
+        """,
+        tuple([f"%{search}%"] * 4),
     )
+
+    st.metric("Matching Candidates", len(candidates_df))
+
+    if candidates_df.empty:
+        st.info("No candidates found. Add a candidate above.")
+    else:
+        st.dataframe(
+            candidates_df,
+            width="stretch",
+            hide_index=True,
+        )
+
+        # ---------- EDIT OR DELETE ----------
+        st.divider()
+        st.subheader("Edit or Delete a Candidate")
+
+        candidate_options = {
+            f"{row['name']} (ID: {row['id']})": int(row["id"])
+            for _, row in candidates_df.iterrows()
+        }
+
+        selected_label = st.selectbox(
+            "Select candidate",
+            list(candidate_options.keys()),
+        )
+        selected_id = candidate_options[selected_label]
+
+        selected_df = fetch_dataframe(
+            "SELECT * FROM candidates WHERE id = ?",
+            (selected_id,),
+        )
+        candidate = selected_df.iloc[0]
+
+        with st.form("edit_candidate_form"):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                edit_name = st.text_input(
+                    "Full Name *",
+                    value=str(candidate["name"] or ""),
+                )
+                edit_email = st.text_input(
+                    "Email",
+                    value=str(candidate["email"] or ""),
+                )
+                edit_phone = st.text_input(
+                    "Phone",
+                    value=str(candidate["phone"] or ""),
+                )
+
+            with col2:
+                edit_location = st.text_input(
+                    "Location",
+                    value=str(candidate["location"] or ""),
+                )
+                edit_experience = st.number_input(
+                    "Experience (years)",
+                    min_value=0.0,
+                    max_value=60.0,
+                    value=float(candidate["experience_years"] or 0),
+                    step=0.5,
+                )
+                edit_skills = st.text_input(
+                    "Skills",
+                    value=str(candidate["skills"] or ""),
+                )
+
+            edit_summary = st.text_area(
+                "Professional Summary",
+                value=str(candidate["summary"] or ""),
+            )
+
+            save_changes = st.form_submit_button(
+                "Save Changes",
+                type="primary",
+            )
+
+            if save_changes:
+                if not edit_name.strip():
+                    st.error("Full name is required.")
+                else:
+                    try:
+                        with get_connection() as conn:
+                            conn.execute(
+                                """
+                                UPDATE candidates
+                                SET name = ?, email = ?, phone = ?,
+                                    location = ?, skills = ?,
+                                    experience_years = ?, summary = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    edit_name.strip(),
+                                    edit_email.strip() or None,
+                                    edit_phone.strip(),
+                                    edit_location.strip(),
+                                    edit_skills.strip(),
+                                    edit_experience,
+                                    edit_summary.strip(),
+                                    selected_id,
+                                ),
+                            )
+
+                        st.success("Candidate updated successfully.")
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "Could not update candidate. "
+                            f"Check for duplicate emails. Details: {exc}"
+                        )
+
+        with st.expander("Delete Candidate"):
+            st.warning(
+                "Deleting a candidate also deletes their linked "
+                "applications and interview history from this database."
+            )
+
+            confirm_delete = st.checkbox(
+                f"I confirm deletion of {candidate['name']}",
+                key=f"confirm_delete_{selected_id}",
+            )
+
+            if st.button(
+                "Delete Selected Candidate",
+                type="secondary",
+                disabled=not confirm_delete,
+            ):
+                try:
+                    with get_connection() as conn:
+                        conn.execute(
+                            "DELETE FROM candidates WHERE id = ?",
+                            (selected_id,),
+                        )
+
+                    st.success("Candidate and linked records deleted.")
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(f"Could not delete candidate: {exc}")
+
 
 elif page == "Jobs":
     st.title("Job Management")
