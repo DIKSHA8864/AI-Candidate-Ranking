@@ -823,14 +823,282 @@ elif page == "Jobs":
                 st.success("Job updated successfully.")
                 st.rerun()
 
+
 elif page == "Applications":
     st.title("Application Tracking")
-    st.write(
-        "Application management and hiring-stage updates will be "
-        "implemented in a later step."
+    st.caption("Manage applications, hiring stages, and recruiter notes.")
+
+    # ---------- CREATE APPLICATION ----------
+    with st.expander("➕ Create Application", expanded=False):
+        candidates = fetch_dataframe(
+            "SELECT id, name, email FROM candidates ORDER BY name"
+        )
+        open_jobs = fetch_dataframe(
+            """
+            SELECT id, title, department, location
+            FROM jobs
+            WHERE status = 'Open'
+            ORDER BY title
+            """
+        )
+
+        if candidates.empty:
+            st.info("Add a candidate before creating an application.")
+        elif open_jobs.empty:
+            st.info("Create an open job before creating an application.")
+        else:
+            candidate_options = {
+                f"{row['name']} (ID: {row['id']})": int(row["id"])
+                for _, row in candidates.iterrows()
+            }
+            job_options = {
+                f"{row['title']} — {row['location'] or 'Location not specified'} (ID: {row['id']})":
+                    int(row["id"])
+                for _, row in open_jobs.iterrows()
+            }
+
+            with st.form("create_application_form"):
+                selected_candidate = st.selectbox(
+                    "Candidate",
+                    list(candidate_options.keys()),
+                )
+                selected_job = st.selectbox(
+                    "Open Job",
+                    list(job_options.keys()),
+                )
+                initial_notes = st.text_area("Recruiter Notes (optional)")
+
+                create_application = st.form_submit_button(
+                    "Create Application",
+                    type="primary",
+                )
+
+                if create_application:
+                    candidate_id = candidate_options[selected_candidate]
+                    job_id = job_options[selected_job]
+
+                    try:
+                        with get_connection() as conn:
+                            cursor = conn.execute(
+                                """
+                                INSERT INTO applications
+                                    (candidate_id, job_id, stage, recruiter_notes)
+                                VALUES (?, ?, 'Applied', ?)
+                                """,
+                                (
+                                    candidate_id,
+                                    job_id,
+                                    initial_notes.strip(),
+                                ),
+                            )
+                            application_id = cursor.lastrowid
+
+                            conn.execute(
+                                """
+                                INSERT INTO stage_history
+                                    (application_id, from_stage, to_stage, notes)
+                                VALUES (?, NULL, 'Applied', ?)
+                                """,
+                                (
+                                    application_id,
+                                    initial_notes.strip() or "Application created",
+                                ),
+                            )
+
+                        st.success("Application created successfully.")
+                        st.rerun()
+
+                    except Exception as exc:
+                        if "UNIQUE constraint failed" in str(exc):
+                            st.error(
+                                "This candidate has already applied "
+                                "for this job."
+                            )
+                        else:
+                            st.error(f"Could not create application: {exc}")
+
+    st.divider()
+
+    # ---------- APPLICATION LIST ----------
+    st.subheader("All Applications")
+
+    search_application = st.text_input(
+        "Search applications",
+        placeholder="Search by candidate, email, or job title",
+        key="application_search",
     )
 
-    st.metric(
-        "Total Applications",
-        get_count("SELECT COUNT(*) FROM applications"),
+    applications_df = fetch_dataframe(
+        """
+        SELECT
+            a.id AS application_id,
+            c.name AS candidate,
+            c.email AS email,
+            j.title AS job,
+            a.stage AS stage,
+            a.ai_score AS ai_score,
+            a.recruiter_notes AS recruiter_notes,
+            a.applied_at AS applied_at,
+            a.updated_at AS updated_at
+        FROM applications a
+        JOIN candidates c ON c.id = a.candidate_id
+        JOIN jobs j ON j.id = a.job_id
+        WHERE c.name LIKE ?
+           OR COALESCE(c.email, '') LIKE ?
+           OR j.title LIKE ?
+        ORDER BY a.id DESC
+        """,
+        tuple([f"%{search_application}%"] * 3),
     )
+
+    total_applications = len(applications_df)
+    interview_total = (
+        int((applications_df["stage"] == "Interview").sum())
+        if total_applications else 0
+    )
+    offer_total = (
+        int((applications_df["stage"] == "Offer").sum())
+        if total_applications else 0
+    )
+    hired_total = (
+        int((applications_df["stage"] == "Hired").sum())
+        if total_applications else 0
+    )
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Applications", total_applications)
+    metric_cols[1].metric("Interviews", interview_total)
+    metric_cols[2].metric("Offers", offer_total)
+    metric_cols[3].metric("Hired", hired_total)
+
+    if applications_df.empty:
+        st.info("No applications found. Create one above.")
+    else:
+        st.dataframe(
+            applications_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "application_id": st.column_config.NumberColumn("Application ID"),
+                "candidate": st.column_config.TextColumn("Candidate"),
+                "email": st.column_config.TextColumn("Email"),
+                "job": st.column_config.TextColumn("Job"),
+                "stage": st.column_config.TextColumn("Hiring Stage"),
+                "ai_score": st.column_config.NumberColumn(
+                    "AI Match Score",
+                    format="%.1f",
+                ),
+                "recruiter_notes": st.column_config.TextColumn("Recruiter Notes"),
+                "applied_at": st.column_config.TextColumn("Applied On"),
+                "updated_at": st.column_config.TextColumn("Last Updated"),
+            },
+        )
+
+        st.divider()
+
+        # ---------- UPDATE STAGE AND NOTES ----------
+        st.subheader("Update Application")
+
+        application_options = {
+            f"#{int(row['application_id'])} — {row['candidate']} / {row['job']}":
+                int(row["application_id"])
+            for _, row in applications_df.iterrows()
+        }
+
+        selected_application_label = st.selectbox(
+            "Select application",
+            list(application_options.keys()),
+        )
+        application_id = application_options[selected_application_label]
+
+        application = fetch_dataframe(
+            "SELECT * FROM applications WHERE id = ?",
+            (application_id,),
+        ).iloc[0]
+
+        current_stage = str(application["stage"])
+        stage_options = list(HIRING_STAGES)
+
+        if current_stage not in stage_options:
+            stage_options.append(current_stage)
+
+        stage_index = stage_options.index(current_stage)
+
+        with st.form("update_application_form"):
+            new_stage = st.selectbox(
+                "Hiring Stage",
+                stage_options,
+                index=stage_index,
+            )
+
+            new_notes = st.text_area(
+                "Recruiter Notes",
+                value=str(application["recruiter_notes"] or ""),
+                help="Record interview feedback or recruitment updates.",
+            )
+
+            update_application = st.form_submit_button(
+                "Save Application Changes",
+                type="primary",
+            )
+
+            if update_application:
+                try:
+                    with get_connection() as conn:
+                        if new_stage != current_stage:
+                            conn.execute(
+                                """
+                                INSERT INTO stage_history
+                                    (application_id, from_stage, to_stage, notes)
+                                VALUES (?, ?, ?, ?)
+                                """,
+                                (
+                                    application_id,
+                                    current_stage,
+                                    new_stage,
+                                    new_notes.strip(),
+                                ),
+                            )
+
+                        conn.execute(
+                            """
+                            UPDATE applications
+                            SET stage = ?,
+                                recruiter_notes = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (
+                                new_stage,
+                                new_notes.strip(),
+                                application_id,
+                            ),
+                        )
+
+                    st.success("Application updated successfully.")
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(f"Could not update application: {exc}")
+
+        # ---------- STAGE HISTORY ----------
+        with st.expander("View Hiring Stage History"):
+            history_df = fetch_dataframe(
+                """
+                SELECT from_stage, to_stage, notes, changed_at
+                FROM stage_history
+                WHERE application_id = ?
+                ORDER BY id DESC
+                """,
+                (application_id,),
+            )
+
+            if history_df.empty:
+                st.info("No stage history recorded yet.")
+            else:
+                st.dataframe(
+                    history_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
