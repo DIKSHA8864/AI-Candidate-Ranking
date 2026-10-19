@@ -586,14 +586,242 @@ elif page == "Candidates":
 
 elif page == "Jobs":
     st.title("Job Management")
-    st.write(
-        "Job creation and editing will be implemented in a later step."
+    st.caption("Create, edit, search, and manage job openings.")
+
+    # ---------- CREATE JOB ----------
+    with st.expander("➕ Create New Job", expanded=False):
+        with st.form("create_job_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                title = st.text_input("Job Title *")
+                department = st.text_input("Department")
+                location = st.text_input("Location")
+
+            with col2:
+                employment_type = st.selectbox(
+                    "Employment Type",
+                    ["Full-time", "Part-time", "Contract", "Internship"],
+                )
+
+                experience_required = st.number_input(
+                    "Required Experience",
+                    min_value=0.0,
+                    max_value=50.0,
+                    value=0.0,
+                    step=0.5,
+                )
+
+                status = st.selectbox(
+                    "Status",
+                    ["Open", "Closed"],
+                )
+
+            required_skills = st.text_input(
+                "Required Skills",
+                placeholder="Python, SQL, FastAPI, NLP",
+            )
+
+            description = st.text_area("Job Description *")
+
+            create_job = st.form_submit_button(
+                "Create Job",
+                type="primary",
+            )
+
+            if create_job:
+                if not title.strip() or not description.strip():
+                    st.error("Job title and description are required.")
+                else:
+                    with get_connection() as conn:
+                        conn.execute(
+                            """
+                            INSERT INTO jobs
+                            (
+                                title,
+                                department,
+                                location,
+                                employment_type,
+                                experience_required,
+                                required_skills,
+                                description,
+                                status
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                title.strip(),
+                                department.strip(),
+                                location.strip(),
+                                employment_type,
+                                experience_required,
+                                required_skills.strip(),
+                                description.strip(),
+                                status,
+                            ),
+                        )
+
+                    st.success("Job created successfully.")
+                    st.rerun()
+
+    st.divider()
+
+    # ---------- SEARCH ----------
+    st.subheader("All Job Openings")
+
+    search_job = st.text_input(
+        "Search jobs",
+        placeholder="Search by title, department, location, or skills",
     )
 
-    st.metric(
-        "Total Jobs",
-        get_count("SELECT COUNT(*) FROM jobs"),
+    jobs_df = fetch_dataframe(
+        """
+        SELECT
+            j.id,
+            j.title,
+            j.department,
+            j.location,
+            j.employment_type,
+            j.experience_required,
+            j.required_skills,
+            j.status,
+            COUNT(a.id) AS applications
+        FROM jobs j
+        LEFT JOIN applications a
+            ON a.job_id = j.id
+        WHERE j.title LIKE ?
+           OR COALESCE(j.department,'') LIKE ?
+           OR COALESCE(j.location,'') LIKE ?
+           OR COALESCE(j.required_skills,'') LIKE ?
+        GROUP BY j.id
+        ORDER BY j.id DESC
+        """,
+        tuple([f"%{search_job}%"] * 4),
     )
+
+    col1, col2, col3 = st.columns(3)
+
+    total_jobs = get_count("SELECT COUNT(*) FROM jobs")
+    open_jobs = get_count(
+        "SELECT COUNT(*) FROM jobs WHERE status='Open'"
+    )
+
+    col1.metric("Total Jobs", total_jobs)
+    col2.metric("Open Jobs", open_jobs)
+    col3.metric("Closed Jobs", total_jobs - open_jobs)
+
+    if jobs_df.empty:
+        st.info("No jobs available.")
+    else:
+        st.dataframe(
+            jobs_df,
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.divider()
+
+        # ---------- EDIT JOB ----------
+        st.subheader("Edit Job")
+
+        options = {
+            f"{row['title']} (ID {row['id']})": int(row["id"])
+            for _, row in jobs_df.iterrows()
+        }
+
+        selected = st.selectbox(
+            "Select Job",
+            list(options.keys()),
+        )
+
+        job_id = options[selected]
+
+        selected_job = fetch_dataframe(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+        ).iloc[0]
+
+        with st.form("edit_job_form"):
+            edit_title = st.text_input(
+                "Job Title",
+                value=str(selected_job["title"]),
+            )
+
+            edit_department = st.text_input(
+                "Department",
+                value=str(selected_job["department"] or ""),
+            )
+
+            edit_location = st.text_input(
+                "Location",
+                value=str(selected_job["location"] or ""),
+            )
+
+            edit_type = st.selectbox(
+                "Employment Type",
+                ["Full-time", "Part-time", "Contract", "Internship"],
+                index=["Full-time","Part-time","Contract","Internship"].index(
+                    selected_job["employment_type"]
+                ),
+            )
+
+            edit_experience = st.number_input(
+                "Required Experience",
+                value=float(selected_job["experience_required"]),
+                step=0.5,
+            )
+
+            edit_skills = st.text_input(
+                "Required Skills",
+                value=str(selected_job["required_skills"] or ""),
+            )
+
+            edit_description = st.text_area(
+                "Job Description",
+                value=str(selected_job["description"] or ""),
+            )
+
+            edit_status = st.selectbox(
+                "Status",
+                ["Open", "Closed"],
+                index=0 if selected_job["status"] == "Open" else 1,
+            )
+
+            save_job = st.form_submit_button(
+                "Save Changes",
+                type="primary",
+            )
+
+            if save_job:
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET title=?,
+                            department=?,
+                            location=?,
+                            employment_type=?,
+                            experience_required=?,
+                            required_skills=?,
+                            description=?,
+                            status=?
+                        WHERE id=?
+                        """,
+                        (
+                            edit_title,
+                            edit_department,
+                            edit_location,
+                            edit_type,
+                            edit_experience,
+                            edit_skills,
+                            edit_description,
+                            edit_status,
+                            job_id,
+                        ),
+                    )
+
+                st.success("Job updated successfully.")
+                st.rerun()
 
 elif page == "Applications":
     st.title("Application Tracking")
